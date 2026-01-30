@@ -1,25 +1,56 @@
 #!/usr/bin/env python3
 """
-Portsaid Catalog Scraper - Versión GitHub Actions
-Simplificado y robusto para ejecución en CI/CD
+Portsaid Catalog Scraper - v3.0 FINAL (Precios y Descuentos Corregidos)
 """
 
 import requests
 import json
 import time
-import os
+import csv
 import sys
 from datetime import datetime
 from pathlib import Path
 
 
+def get_product_prices(product):
+    """Extrae los precios correctos del producto."""
+    items = product.get('items', [])
+    if not items:
+        return 0, 0
+    
+    item = items[0]
+    sellers = item.get('sellers', [])
+    
+    if not sellers:
+        return 0, 0
+    
+    seller = sellers[0]
+    offer = seller.get('commertialOffer', {})
+    
+    # Precio de venta (con descuento aplicado)
+    selling_price = offer.get('Price', 0)
+    
+    # Precio de lista (sin descuento)
+    list_price = offer.get('ListPrice', 0)
+    
+    # Si ListPrice es 0 o igual al selling, intentar con PriceWithoutDiscount
+    if list_price == 0 or list_price == selling_price:
+        list_price = offer.get('PriceWithoutDiscount', selling_price)
+    
+    # Fallback: usar priceRange si no hay precios
+    if list_price == 0 or selling_price == 0:
+        price_range = product.get('priceRange', {})
+        list_price = price_range.get('listPrice', {}).get('highPrice', 0)
+        selling_price = price_range.get('sellingPrice', {}).get('highPrice', 0)
+    
+    return list_price, selling_price
+
+
 def main():
-    """Función principal del scraper."""
     print("="*60)
-    print("PORTSAID CATALOG SCRAPER - GitHub Actions")
+    print("PORTSAID CATALOG SCRAPER - v3.0")
     print("="*60)
     
-    # Configuración
     base_url = "https://www.portsaid.com.ar"
     api_endpoint = "/api/io/_v/api/intelligent-search/product_search"
     output_dir = Path("output")
@@ -30,106 +61,90 @@ def main():
         'Accept': 'application/json'
     }
     
-    print(f"Output directory: {output_dir.absolute()}")
-    print(f"Starting extraction...")
+    print(f"Output: {output_dir.absolute()}")
     
     # Extraer productos
     all_products = []
     page = 1
-    max_pages = 50  # Límite de seguridad
     
-    try:
-        while page <= max_pages:
-            url = f"{base_url}{api_endpoint}?page={page}"
-            print(f"Fetching page {page}...")
-            
+    while True:
+        url = f"{base_url}{api_endpoint}?page={page}"
+        print(f"Page {page}...")
+        
+        try:
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             
             products = data.get('products', [])
             if not products:
-                print(f"No more products at page {page}")
                 break
             
             all_products.extend(products)
-            print(f"  Page {page}: {len(products)} products (Total: {len(all_products)})")
+            print(f"  +{len(products)} = {len(all_products)}")
             
             page += 1
-            time.sleep(0.5)  # Pausa entre requests
-        
-        print(f"\nExtraction complete: {len(all_products)} products")
-        
-        # Procesar productos
-        processed = []
-        for product in all_products:
-            try:
-                price_range = product.get('priceRange', {})
-                selling_price = price_range.get('sellingPrice', {}).get('highPrice', 0)
-                list_price = price_range.get('listPrice', {}).get('highPrice', 0)
-                
-                categories = product.get('categories', [])
-                category = categories[0] if categories else ''
-                
-                items = product.get('items', [])
-                main_image = ''
-                if items:
-                    images = items[0].get('images', [])
-                    if images:
-                        main_image = images[0].get('imageUrl', '')
-                
-                processed.append({
-                    'ID': product.get('productId', ''),
-                    'Nombre': product.get('productName', ''),
-                    'Marca': product.get('brand', ''),
-                    'Categoría': category.replace('/', ' > ').strip(' >'),
-                    'Precio Lista': list_price,
-                    'Precio Venta': selling_price,
-                    'Descuento %': round((1 - selling_price/list_price) * 100, 0) if list_price > 0 else 0,
-                    'URL Imagen': main_image,
-                    'URL Producto': f"{base_url}{product.get('link', '')}",
-                    'Descripcion': product.get('description', '')[:300]
-                })
-            except Exception as e:
-                print(f"  Warning: Error processing product: {e}")
-                continue
-        
-        print(f"Processed: {len(processed)} products")
-        
-        # Guardar como JSON (formato intermedio)
-        json_path = output_dir / "products.json"
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(processed, f, ensure_ascii=False, indent=2)
-        print(f"Saved JSON: {json_path}")
-        
-        # Guardar como CSV
-        try:
-            import csv
-            csv_path = output_dir / f"portsaid_catalogo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
-                if processed:
-                    writer = csv.DictWriter(f, fieldnames=processed[0].keys())
-                    writer.writeheader()
-                    writer.writerows(processed)
-            print(f"Saved CSV: {csv_path}")
+            time.sleep(0.3)
+            
         except Exception as e:
-            print(f"Warning: Could not save CSV: {e}")
-        
-        print("="*60)
-        print("SUCCESS: Scraper completed successfully!")
-        print("="*60)
-        return 0
-        
-    except requests.RequestException as e:
-        print(f"ERROR: Network error: {e}")
-        return 1
-    except Exception as e:
-        print(f"ERROR: Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
-        return 1
+            print(f"Error: {e}")
+            break
+    
+    print(f"\nTotal: {len(all_products)} products")
+    
+    # Procesar
+    processed = []
+    discount_count = 0
+    
+    for p in all_products:
+        try:
+            list_price, selling_price = get_product_prices(p)
+            
+            # Calcular descuento
+            discount = 0
+            if list_price > 0 and selling_price > 0 and list_price > selling_price:
+                discount = round((1 - selling_price / list_price) * 100, 0)
+                discount_count += 1
+            
+            # Imagen
+            items = p.get('items', [])
+            img = items[0]['images'][0]['imageUrl'] if items and items[0].get('images') else ''
+            
+            # Categoria
+            categories = p.get('categories', [])
+            category = categories[0].replace('/', ' > ').strip(' >') if categories else ''
+            
+            processed.append({
+                'ID': p.get('productId', ''),
+                'Nombre': p.get('productName', ''),
+                'Marca': p.get('brand', ''),
+                'Categoria': category,
+                'Precio Lista': list_price,
+                'Precio Venta': selling_price,
+                'Descuento %': int(discount),
+                'URL Imagen': img,
+                'URL Producto': f"{base_url}{p.get('link', '')}"
+            })
+        except:
+            continue
+    
+    print(f"Processed: {len(processed)}")
+    print(f"With discount: {discount_count}")
+    
+    # Guardar CSV
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_path = output_dir / f"portsaid_catalogo_{timestamp}.csv"
+    
+    with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+        if processed:
+            writer = csv.DictWriter(f, fieldnames=processed[0].keys())
+            writer.writeheader()
+            writer.writerows(processed)
+    
+    print(f"Saved: {csv_path}")
+    print("="*60)
+    return 0
 
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    sys.exit(main())
